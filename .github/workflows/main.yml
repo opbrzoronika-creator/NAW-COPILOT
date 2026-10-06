@@ -75,6 +75,21 @@ jobs:
         working-directory: ${{ env.APP_DIR }}
         run: npx cap sync android
 
+      # ==========================================
+      # NATIVE AUTO UPDATER
+      # ==========================================
+      - name: Apply native auto updater
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          if [ ! -f "native-updater/apply.py" ]; then
+            echo "ERROR: native-updater/apply.py not found."
+            exit 1
+          fi
+
+          python3 native-updater/apply.py
+
+          echo "Native auto updater installed."
+
       - name: Locate Android SDK
         run: |
           SDKMANAGER=$(find "$ANDROID_HOME" -type f -name sdkmanager -print -quit)
