@@ -34,8 +34,6 @@ jobs:
           mkdir app
           unzip -q NAW-Copilot-Remotion-GitHub-APK.zip -d app
 
-          find app -maxdepth 3 -type f | head -100
-
           PROJECT_DIR=$(find app -maxdepth 3 -name package.json -type f -print -quit | xargs dirname)
 
           if [ -z "$PROJECT_DIR" ] || [ "$PROJECT_DIR" = "." ]; then
@@ -50,7 +48,12 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          VERSION_CODE=$(node -e "const v=require('./package.json').version.split('.').map(Number); console.log(v[0]*10000+v[1]*100+v[2])")
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+
           echo "Building NAW Copilot v$VERSION"
+          echo "Android versionCode: $VERSION_CODE"
 
       - name: Install npm dependencies
         working-directory: ${{ env.APP_DIR }}
@@ -83,10 +86,6 @@ jobs:
 
           echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
 
-      - name: Check Android SDK
-        run: |
-          sdkmanager --version
-
       - name: Install Android SDK packages
         run: |
           yes | sdkmanager --licenses || true
@@ -94,11 +93,117 @@ jobs:
           sdkmanager "platforms;android-35"
           sdkmanager "build-tools;35.0.0"
 
-      - name: Build Android APK
+      - name: Decode signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/naw-copilot-release.jks"
+
+          if [ ! -s "$RUNNER_TEMP/naw-copilot-release.jks" ]; then
+            echo "ERROR: Keystore gagal dibuat."
+            exit 1
+          fi
+
+      - name: Configure Android signing
+        working-directory: ${{ env.APP_DIR }}/android
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          VERSION_CODE: ${{ env.VERSION_CODE }}
+          APP_VERSION: ${{ env.APP_VERSION }}
+        run: |
+          cat > keystore.properties <<EOF
+          storeFile=$RUNNER_TEMP/naw-copilot-release.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("app/build.gradle")
+          text = path.read_text()
+
+          version_code = os.environ["VERSION_CODE"]
+          app_version = os.environ["APP_VERSION"]
+
+          # Tambahkan pembacaan keystore.properties
+          header = '''def keystorePropertiesFile = rootProject.file("keystore.properties")
+          def keystoreProperties = new Properties()
+
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+          }
+
+          '''
+
+          if "keystorePropertiesFile" not in text:
+              text = header + text
+
+          # Pastikan versionCode dan versionName sesuai package.json
+          text = re.sub(
+              r'versionCode\s+\d+',
+              f'versionCode {version_code}',
+              text,
+              count=1
+          )
+
+          text = re.sub(
+              r'versionName\s+"[^"]*"',
+              f'versionName "{app_version}"',
+              text,
+              count=1
+          )
+
+          # Tambahkan signingConfigs sebelum buildTypes
+          if "signingConfigs {" not in text:
+              signing_config = '''    signingConfigs {
+                  release {
+                      storeFile file(keystoreProperties['storeFile'])
+                      storePassword keystoreProperties['storePassword']
+                      keyAlias keystoreProperties['keyAlias']
+                      keyPassword keystoreProperties['keyPassword']
+                  }
+              }
+
+          '''
+
+              text = text.replace(
+                  "    buildTypes {",
+                  signing_config + "    buildTypes {",
+                  1
+              )
+
+          # Hubungkan release build dengan signingConfigs.release
+          release_pattern = r'(    buildTypes\s*\{\s*release\s*\{)'
+
+          if "signingConfig signingConfigs.release" not in text:
+              text = re.sub(
+                  release_pattern,
+                  r'\1\n            signingConfig signingConfigs.release',
+                  text,
+                  count=1
+              )
+
+          path.write_text(text)
+          PY
+
+      - name: Build signed Android APK
         working-directory: ${{ env.APP_DIR }}/android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Remove temporary signing configuration
+        if: always()
+        working-directory: ${{ env.APP_DIR }}/android
+        run: |
+          rm -f keystore.properties
+          rm -f "$RUNNER_TEMP/naw-copilot-release.jks"
 
       - name: Verify APK
         run: |
@@ -107,16 +212,16 @@ jobs:
             -name "*.apk" \
             -print
 
-      - name: Upload APK artifact
+      - name: Upload signed APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NAW-Copilot-APK
-          path: ${{ env.APP_DIR }}/android/app/build/outputs/apk/debug/app-debug.apk
+          name: NAW-Copilot-APK-v${{ env.APP_VERSION }}
+          path: ${{ env.APP_DIR }}/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
       - name: Prepare release APK
         run: |
-          cp "${{ env.APP_DIR }}/android/app/build/outputs/apk/debug/app-debug.apk" \
+          cp "${{ env.APP_DIR }}/android/app/build/outputs/apk/release/app-release.apk" \
              "NAW-Copilot-v${APP_VERSION}.apk"
 
       - name: Create GitHub Release
@@ -129,6 +234,7 @@ jobs:
 
             - English-only interface
             - Orange-red logo
+            - Signed release APK
             - Automatic update check outside Google Play
           files: NAW-Copilot-v${{ env.APP_VERSION }}.apk
           make_latest: true
