@@ -51,6 +51,10 @@ jobs:
         working-directory: ${{ env.APP_DIR }}
         run: npm run build
 
+      - name: Install TypeScript
+        working-directory: ${{ env.APP_DIR }}
+        run: npm install -D typescript
+
       - name: Install Capacitor Android
         working-directory: ${{ env.APP_DIR }}
         run: npx cap add android
